@@ -80,6 +80,8 @@ const allowedkeywords = (
     :odesolve_kwargs,
     # If Solvers which internally use linsolve
     :linsolve_kwargs,
+    # BVP solvers with the `optimize` slot forwarding to Optimization.jl
+    :optimize_kwargs,
     # Solvers internally using EnsembleProblem
     :ensemblealg,
     # Fine Grained Control of Tracing (Storing and Logging) during Solve
