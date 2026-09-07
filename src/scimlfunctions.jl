@@ -3276,30 +3276,78 @@ function ODEFunction(f::NonlinearFunction)
     return ODEFunction{iip}(f)
 end
 
+"""
+$(TYPEDEF)
+
+Adapts a nonlinear residual `f(du, u, p)` (in-place) or `f(u, p)` (out-of-place) to the
+ODE calling convention `f(du, u, p, t)` / `f(u, p, t)`, ignoring `t`. This is the callable
+[`ODEFunction`](@ref)`(::NonlinearFunction)` installs as `f.f`.
+
+It is a named struct that holds only the bare residual, instead of a closure over the whole
+`NonlinearFunction`. The distinction matters for automatic differentiation tools that shadow
+the callable they differentiate (Enzyme's `Duplicated`): a closure over the container would
+drag `sys`, `observed`, `initialization_data` and `resid_prototype` into the shadow, and the
+shadow would have to be allocated and re-zeroed on every call. With a single field that is
+the residual itself, Enzyme can prove the adapter free of differentiable state
+(`make_zero(a) === a`) and needs no shadow at all.
+
+# Fields
+$(TYPEDFIELDS)
+"""
+struct NonlinearFunctionRHS{iip, F}
+    """The nonlinear residual, with FunctionWrappers already peeled by `unwrapped_f`."""
+    f::F
+end
+NonlinearFunctionRHS{iip}(f::F) where {iip, F} = NonlinearFunctionRHS{iip, F}(f)
+(a::NonlinearFunctionRHS{true})(du, u, p, t) = (a.f(du, u, p); nothing)
+(a::NonlinearFunctionRHS{false})(u, p, t) = a.f(u, p)
+
+"""
+$(SIGNATURES)
+
+Converts a `NonlinearFunction` into an `ODEFunction` whose right-hand side ignores `t`.
+
+The residual is wrapped in a [`NonlinearFunctionRHS`](@ref) over the bare (FunctionWrapper-
+free) callable, so the differentiated object carries no reference to the container. The
+lifted `analytic`, `jac`, `jvp` and `vjp` capture only their own field for the same reason.
+For the [`AutoSpecialize`](@ref), [`AutoDespecialize`](@ref) and [`AutoRespecialize`](@ref)
+specializations the bounded metadata type parameters (`initialization_data`, `nlstep_data`)
+are widened to their upper bounds, matching what `ODEFunction{iip, specialize}(::ODEFunction)`
+does, so model-specific metadata does not defeat compilation reuse.
+"""
 function ODEFunction{iip}(f::NonlinearFunction) where {iip}
-    _f = iip ? (du, u, p, t) -> (f.f(du, u, p); nothing) : (u, p, t) -> f.f(u, p)
-    if f.analytic !== nothing
-        _analytic = (u0, p, t) -> f.analytic(u0, p)
+    _f = NonlinearFunctionRHS{iip}(unwrapped_f(f.f))
+    _analytic = if f.analytic !== nothing
+        let analytic = f.analytic
+            (u0, p, t) -> analytic(u0, p)
+        end
     else
-        _analytic = nothing
+        nothing
     end
-    if f.jac !== nothing
-        _jac = iip ? (J, u, p, t) -> (f.jac(J, u, p); nothing) : (u, p, t) -> f.jac(u, p)
+    _jac = if f.jac !== nothing
+        let jac = f.jac
+            iip ? (J, u, p, t) -> (jac(J, u, p); nothing) : (u, p, t) -> jac(u, p)
+        end
     else
-        _jac = nothing
+        nothing
     end
-    if f.jvp !== nothing
-        _jvp = iip ? (Jv, u, p, t) -> (f.jvp(Jv, u, p); nothing) : (u, p, t) -> f.jvp(u, p)
+    _jvp = if f.jvp !== nothing
+        let jvp = f.jvp
+            iip ? (Jv, u, p, t) -> (jvp(Jv, u, p); nothing) : (u, p, t) -> jvp(u, p)
+        end
     else
-        _jvp = nothing
+        nothing
     end
-    if f.vjp !== nothing
-        _vjp = iip ? (vJ, u, p, t) -> (f.vjp(vJ, u, p); nothing) : (u, p, t) -> f.vjp(u, p)
+    _vjp = if f.vjp !== nothing
+        let vjp = f.vjp
+            iip ? (vJ, u, p, t) -> (vjp(vJ, u, p); nothing) : (u, p, t) -> vjp(u, p)
+        end
     else
-        _vjp = nothing
+        nothing
     end
 
-    return ODEFunction{iip, specialization(f)}(
+    spec = specialization(f)
+    ode = ODEFunction{iip, spec}(
         _f;
         f.mass_matrix,
         analytic = _analytic,
@@ -3314,6 +3362,10 @@ function ODEFunction{iip}(f::NonlinearFunction) where {iip}
         f.colorvec,
         f.initialization_data
     )
+    # construction from a raw callable keeps concrete metadata types; the `Auto*`
+    # specializations want them widened, as the `ODEFunction -> ODEFunction` route does
+    widen = spec === AutoSpecialize || spec === AutoDespecialize || spec === AutoRespecialize
+    return widen ? widen_bounded_type_params(ode) : ode
 end
 
 """

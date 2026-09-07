@@ -83,6 +83,55 @@ end
     end
 end
 
+@testset "ODEFunction from NonlinearFunction" begin
+    resid_iip(du, u, p) = (du .= u .^ 2 .- p; nothing)
+    resid_oop(u, p) = u .^ 2 .- p
+    jac_iip(J, u, p) = (J .= 2 .* u; nothing)
+    initdata = SciMLBase.OverrideInitData(
+        NonlinearProblem((u, p) -> u, [0.0]), nothing, identity, nothing
+    )
+    u, p = [1.0, 2.0], 1.0
+
+    for (spec, widened) in (
+            (SciMLBase.FullSpecialize, false),
+            (SciMLBase.AutoSpecialize, true),
+            (SciMLBase.AutoDespecialize, true),
+            (SciMLBase.AutoRespecialize, true),
+        )
+        nlf = NonlinearFunction{true, spec}(
+            resid_iip; jac = jac_iip, sys = :sys, initialization_data = initdata
+        )
+        ode = ODEFunction{true}(nlf)
+        @test SciMLBase.specialization(ode) === spec
+        # the rhs is a named adapter holding only the bare residual, never the container
+        @test ode.f isa SciMLBase.NonlinearFunctionRHS{true}
+        @test ode.f.f === resid_iip
+        @test fieldnames(typeof(ode.f)) == (:f,)
+        du = zeros(2)
+        ode.f(du, u, p, 0.0)
+        @test du == [0.0, 3.0]
+        du2 = zeros(2)
+        ode(du2, u, p, 0.0)
+        @test du2 == du
+        # lifted fields forward to the nonlinear ones and carry nothing else
+        J = zeros(2)
+        ode.jac(J, u, p, 0.0)
+        @test J == [2.0, 4.0]
+        @test ode.sys === :sys
+        @test ode.initialization_data === initdata
+        # metadata types are widened for the `Auto*` specializations, as the
+        # `ODEFunction -> ODEFunction` route does, and kept concrete otherwise
+        expected = widened ? Union{Nothing, SciMLBase.OverrideInitData} : typeof(initdata)
+        @test fieldtype(typeof(ode), :initialization_data) === expected
+    end
+
+    ode_oop = ODEFunction{false}(NonlinearFunction{false}(resid_oop))
+    @test ode_oop.f isa SciMLBase.NonlinearFunctionRHS{false}
+    @test ode_oop.f.f === resid_oop
+    @test ode_oop.f(u, p, 0.0) == [0.0, 3.0]
+    @test ode_oop(u, p, 0.0) == [0.0, 3.0]
+end
+
 @testset "ODEFunction specialization constructor" begin
     rhs = (u, p, t) -> u
     initdata = SciMLBase.OverrideInitData(
